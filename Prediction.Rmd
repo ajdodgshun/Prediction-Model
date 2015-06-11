@@ -1,0 +1,120 @@
+Building a Prediction Model for Weightlifting Activity Quality
+===========
+
+##Loading libraries and reading in data
+
+```{r}
+library(ggplot2)
+library(rpart)
+library(rpart.plot)
+library(caret)
+library(ipred)
+library(randomForest)
+training <- read.csv("pml-training.csv", stringsAsFactors = F)
+validation <- read.csv("pml-testing.csv", stringsAsFactors = F)
+```
+##Exploration
+
+In exploring the training and validation sets it can be seen that there most of the variables in the sets have only NA values, therefore cannot be used so we will reduce the training set accordingly.  There is no point in building a predictor which uses variables commonly not measured.
+
+First we find those columns where NAs exist and assign them to a vector.  Then we fill a vector with the names where NA values do NOT exist (keep). Then we create a new object called trainsmall which only contains the columns whose names are in the keep vector.  We will also remove timestamps, the window columns and the numbering column X as these are not informative.
+
+```{r}
+missing <- apply(validation, 2, anyNA)
+keep <- NULL
+for(i in 1:160){
+if(missing[i] == F) keep <- c(keep, names(training)[i])
+} 
+trainsmall <- training[, names(training) %in% keep]
+trainsmall$user_name <- as.factor(training$user_name)
+trainsmall$classe <- as.factor(training$classe)
+trainsmall <- trainsmall[, -c(1,3:7)]
+```
+
+As we are using the "testing" set provided as a validation set we will create an training and a test set from the "training" data
+
+```{r}
+set.seed(14232)
+intrain <- createDataPartition(y=trainsmall$classe, p = 0.7, list = F)
+train <- trainsmall[intrain,]
+test <- trainsmall[-intrain,]
+```
+##Exploratory plotting
+
+There are no variables with near zero variability so none to automatically exclude.
+A feature plot may show some patterns since some measurements are highly variable and others are not,  standardising data is warranted before plotting.  The y axis limits are still set to -10 and 10 otherwise much of the underlying variability is not seen for the scale.  This plot shows some interesting points.  The first is that it looks like many of the features are variable within "classe" rather than between "classe".  We can see that there are several features where E shows much more variability than the others, some where this only applies to D and some only to A.
+
+```{r}
+useless <- nearZeroVar(train, saveMetrics = T)
+sum(useless$nzv)
+trainstand <- as.data.frame(scale(train[,2:53]))
+featurePlot(x = trainstand, y = train$classe, ylim = c(-10,10))
+```
+
+##Assessing redundancy
+
+We should drop user_name as this is not a generalisable predictor.
+
+We can see which variables are highly correlated with each other.  It appears that "roll_belt" is highly correlated with "yaw_belt", "total_accel_belt", "accel_belt_y", and "accel_belt_z".  Likewise "pitch_belt" is highly correlated with "accel_belt_x" and "magnet_belt_x". "gyros_forearm_z" is highly correlated with "gyros_dumbbell_" both x and y as well as "gyros_forearm_y".
+
+It would almost certainly be safe to remove these variables as the correlation with other variables is strong but given that computational power is not particularly limited we should leave all of these factors in for maximum accuracy.
+
+
+```{r}
+train <- train[,2:54]
+M <- abs(cor(train[,-53]))
+diag(M) <- 0
+correlated <- which(M>0.8, arr.ind=T)
+correlated
+columns <- unique(correlated[,2])
+names(train)[columns]
+```
+##Principal components analysis
+
+We can see if, instead, we run a principal components analysis on the data then we explain a lot of the variablility, by definition, but we do NOT explain the variability between "classe" groups which is the important thing.  This is likely because there are recordings taken at many different times during the movement of lifting the weight and it is likely that most of the variability in the data is explained by differences in the phase of movement rather than the way it is done.  This leads me to strongly suspect that a decision tree algorithm of some kind will be the best predictor.
+
+```{r}
+PCA <- preProcess(train[,-53], method = "pca", pcaComp = 2)
+trainPC <- predict(PCA, train[,-53])
+qplot(trainPC[,1], trainPC[,2], colour = train$classe)
+```
+
+##Training the model
+
+Confident that a tree method is going to be the most efficient and effective at differentiating the variable of interest we can go ahead and fit the model using a boosted tree model "gbm" which uses Stochastic Gradient Boosting.  Cross validation is inherent in the method which should assure the greatest accuracy.
+
+```{r}
+modelfit <- train(classe ~ ., method = "gbm", verbose = F, data = train)
+```
+##Assessing the model on the training set
+
+We can now assess the accuracy of the new predictor function on our training set.  Accuracy of >95% will be sufficient.  We can see that the accuracy is 97.4% (95% C.I. 97.1% - 97.6%) meaning an in-sample error rate of <3% which is excellent.  We expect that our out-of-sample error rate will be higher but because of the cross-validation performed by the caret package in training the model the out-of-sample error rate should still be <5%
+
+```{r}
+predicted <- predict(modelfit, train[,-53])
+confusionMatrix(predicted, train$classe)
+```
+##Testing the model
+
+We can now predict the test set based on this model and we find the accurary is still >96%.  The error rate is higher than the in-sample error as we expected but is still acceptable at <5%.
+
+```{r}
+predictedtest <- predict(modelfit, test[2:53])
+confusionMatrix(predictedtest, test$classe)
+```
+##Using the model on the validation set
+
+Now we can move on to the validation set where the "classe" variable is unknown.  This has been assigned to the variable "validation" at the beginning of the code.  Since the conditions of the decision tree are named variables, there is no need to subset the validation frame by only the variable names used.
+
+```{r eval=FALSE}
+answers <- as.character(predict(modelfit, validation))
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+setwd("answers")
+pml_write_files(answers)
+```
